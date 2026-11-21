@@ -340,6 +340,26 @@ class Query(QueryInstance):
             ('exists', self._path)
         )
 
+    def between(self, start: Any, end: Any) -> QueryInstance:
+        """
+        Test a dict value for being between two values (inclusive).
+
+        >>> Query().f1.between(1, 10)
+
+        :param start: The lower bound (inclusive)
+        :param end: The upper bound (inclusive)
+        """
+        def test(value):
+            try:
+                return start <= value <= end
+            except TypeError:
+                return False
+
+        return self._generate_test(
+            test,
+            ('between', self._path, freeze(start), freeze(end))
+        )
+
     def matches(self, regex: str, flags: int = 0) -> QueryInstance:
         """
         Run a regex test against a dict value (whole string has to match).
@@ -532,4 +552,7 @@ def where(key: str) -> Query:
     """
     A shorthand for ``Query()[key]``
     """
-    return Query()[key]
+    q = Query()
+    for part in key.split('.'):
+        q = q[part]
+    return q
