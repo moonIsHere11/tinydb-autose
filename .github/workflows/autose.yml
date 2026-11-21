@@ -1,0 +1,334 @@
+# AutoSE: issue in -> tested, independently reviewed PR out. A human merges.
+# Unrolled, bounded DAG (ADR-002):
+#   gate -> build -> ship_0 -> review_1 -> rework_1 -> ship_1 -> review_2 -> finalize
+# Each job gets only the token permissions it needs (ADR-005). The LLM never holds a
+# token: agents run inside a --network none container; tokens are used only by
+# deterministic harness steps. Issue/comment text is never interpolated into shell.
+name: autose
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+concurrency:
+  group: autose-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/.autose
+  AUTOSE_MAX_STEPS: "16"
+  AUTOSE_TOKEN_BUDGET: "2500000"
+
+jobs:
+  gate:
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'autose') ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/autose') &&
+       github.event.comment.user.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      issue: ${{ steps.plan.outputs.issue }}
+      pr: ${{ steps.plan.outputs.pr }}
+      base: ${{ steps.plan.outputs.base }}
+      head: ${{ steps.plan.outputs.head }}
+      variant: ${{ steps.plan.outputs.variant }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false, sparse-checkout: .autose }
+      - name: Authorise trigger (write/maintain/admin only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SENDER: ${{ github.event.sender.login }}
+        run: |
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$SENDER/permission" -q .permission || echo none)
+          echo "sender=$SENDER permission=$perm"
+          case "$perm" in admin|maintain|write) ;; *) echo "::error::$SENDER may not trigger autose"; exit 1;; esac
+      - name: Plan run
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ github.event.issue.number }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          COMMENT: ${{ github.event.comment.body }}
+          SENDER: ${{ github.event.sender.login }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/in"
+          variant=full
+          case "$COMMENT" in "/autose review naive"*) variant=naive;; esac
+          if [ "$IS_PR" = "true" ]; then
+            # review-only mode on an existing PR (used for seeded PRs)
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$N" > "$RUNNER_TEMP/pr.json"
+            base=$(jq -r .base.sha "$RUNNER_TEMP/pr.json"); head=$(jq -r .head.sha "$RUNNER_TEMP/pr.json")
+            linked=$(jq -r '.body // ""' "$RUNNER_TEMP/pr.json" | grep -oiE '(closes|fixes|resolves) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+            if [ -n "$linked" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/issues/$linked" --jq '{number,title,body}' > "$RUNNER_TEMP/in/issue.json"
+            else
+              jq '{number,title,body}' "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/in/issue.json"
+            fi
+            jq -r '.body // ""' "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/in/pr_body.md"
+            { echo mode=review; echo issue="${linked:-$N}"; echo pr="$N"; echo base="$base"; echo head="$head"; } >> "$GITHUB_OUTPUT"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$N" --jq '{number,title,body}' > "$RUNNER_TEMP/in/issue.json"
+            { echo mode=build; echo issue="$N"; echo base="$GITHUB_SHA"; } >> "$GITHUB_OUTPUT"
+            python3 -m autose.pipeline ledger --issue "$N" --fresh true --set "trigger=pass:started by @$SENDER via $EVENT"
+          fi
+          echo variant=$variant >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in/" }
+
+  # ---------------------------------------------------------------- stages 1-4
+  build:
+    needs: gate
+    if: needs.gate.outputs.mode == 'build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.gate.outputs.base }}", persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+      - name: Requirements -> Design -> Implementation -> Testing (state machine)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m autose.pipeline build --issue-file "$RUNNER_TEMP/in/issue.json" --out "$RUNNER_TEMP/work"
+      - name: Job summary
+        if: always()
+        run: for f in spec.md design.md test_report.md; do [ -f "$RUNNER_TEMP/work/$f" ] && { echo; cat "$RUNNER_TEMP/work/$f"; } >> "$GITHUB_STEP_SUMMARY"; done; true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: work-0, path: "${{ runner.temp }}/work/", include-hidden-files: true }
+
+  # ---------------------------------------------------------------- stage 5 (deterministic)
+  ship_0:
+    needs: [gate, build]
+    if: always() && needs.gate.outputs.mode == 'build' && needs.build.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      statuses: write
+    outputs:
+      shipped: ${{ steps.ship.outputs.shipped }}
+      pr: ${{ steps.ship.outputs.pr }}
+      head: ${{ steps.ship.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.gate.outputs.base }}", fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - uses: actions/download-artifact@v4
+        with: { name: work-0, path: "${{ runner.temp }}/work" }
+        continue-on-error: true
+      - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+      - name: Ledger (stages 1-4)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          [ -f "$RUNNER_TEMP/work/status.json" ] || echo '{"ok":false,"stopped_at":"build-crash","stages":{}}' > "$RUNNER_TEMP/work/status.json"
+          python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --status-json "$RUNNER_TEMP/work/status.json"
+      - name: Push branch, open PR, run CI
+        id: ship
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: python3 -m autose.pipeline ship --issue-file "$RUNNER_TEMP/in/issue.json" --work "$RUNNER_TEMP/work" --out "$RUNNER_TEMP/rel" --round 0 --base ${{ needs.gate.outputs.base }} --base-branch ${{ github.event.repository.default_branch }}
+      - name: Ledger (release)
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if [ "${{ steps.ship.outputs.shipped }}" = "true" ]; then s="pass:PR #${{ steps.ship.outputs.pr }}, CI ${{ steps.ship.outputs.ci }}"; else s="stop:not released ($(head -c 150 "$RUNNER_TEMP/rel/pr.md" 2>/dev/null))"; fi
+          python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "release=$s"
+          cat "$RUNNER_TEMP/rel/pr.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: release-0, path: "${{ runner.temp }}/rel/" }
+
+  # ---------------------------------------------------------------- stage 6, round 1
+  review_1:
+    needs: [gate, ship_0]
+    if: >-
+      always() && (needs.gate.outputs.mode == 'review' ||
+      (needs.gate.outputs.mode == 'build' && needs.ship_0.outputs.shipped == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+    env:
+      PR: ${{ needs.gate.outputs.mode == 'review' && needs.gate.outputs.pr || needs.ship_0.outputs.pr }}
+      HEAD: ${{ needs.gate.outputs.mode == 'review' && needs.gate.outputs.head || needs.ship_0.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ env.HEAD }}", fetch-depth: 0, persist-credentials: false }
+      # The reviewer downloads ONLY the issue: never spec/design/transcripts (ADR-008)
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - run: |
+          docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+          # the harness/prompts must come from the trusted default branch, never from the PR under review
+          git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose
+          git reset -q .autose
+      - name: Independent review
+        id: review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AUTOSE_MODEL_REVIEWER_NAIVE: ""
+        run: |
+          python3 -m autose.pipeline review --issue-file "$RUNNER_TEMP/in/issue.json" --base ${{ needs.gate.outputs.base }} \
+            --round 1 --out "$RUNNER_TEMP/review" --variant ${{ needs.gate.outputs.variant }} --context "$RUNNER_TEMP/in"
+      - name: Post review + ledger (deterministic, holds the token)
+        if: always() && steps.review.outcome == 'success'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          python3 -m autose.pipeline post-review --pr "$PR" --review-md "$RUNNER_TEMP/review/review.md"
+          if [ "${{ needs.gate.outputs.mode }}" = "build" ]; then
+            python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "review_1=${{ steps.review.outputs.verdict }}:see PR #$PR"
+          fi
+          cat "$RUNNER_TEMP/review/review.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: review-1, path: "${{ runner.temp }}/review/" }
+
+  # ---------------------------------------------------------------- back-edge: review -> design|implementation
+  rework_1:
+    needs: [gate, build, review_1]
+    if: always() && needs.gate.outputs.mode == 'build' && needs.review_1.outputs.verdict == 'changes_requested'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.gate.outputs.base }}", persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - uses: actions/download-artifact@v4
+        with: { name: work-0, path: "${{ runner.temp }}/work0" }
+      - uses: actions/download-artifact@v4
+        with: { name: review-1, path: "${{ runner.temp }}/review1" }
+      - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+      - name: Rework (re-enter at design or implementation)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m autose.pipeline rework --issue-file "$RUNNER_TEMP/in/issue.json" --prev "$RUNNER_TEMP/work0" --review "$RUNNER_TEMP/review1/review.json" --round 1 --out "$RUNNER_TEMP/work"
+      - name: Job summary
+        if: always()
+        run: for f in design.md test_report.md; do [ -f "$RUNNER_TEMP/work/$f" ] && { echo; cat "$RUNNER_TEMP/work/$f"; } >> "$GITHUB_STEP_SUMMARY"; done; true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: work-1, path: "${{ runner.temp }}/work/", include-hidden-files: true }
+
+  ship_1:
+    needs: [gate, rework_1]
+    if: always() && needs.rework_1.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      statuses: write
+    outputs:
+      shipped: ${{ steps.ship.outputs.shipped }}
+      pr: ${{ steps.ship.outputs.pr }}
+      head: ${{ steps.ship.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.gate.outputs.base }}", fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - uses: actions/download-artifact@v4
+        with: { name: work-1, path: "${{ runner.temp }}/work" }
+        continue-on-error: true
+      - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+      - name: Push rework, update PR, run CI
+        id: ship
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          [ -f "$RUNNER_TEMP/work/status.json" ] || echo '{"ok":false,"stopped_at":"rework-crash","stages":{}}' > "$RUNNER_TEMP/work/status.json"
+          python3 -m autose.pipeline ship --issue-file "$RUNNER_TEMP/in/issue.json" --work "$RUNNER_TEMP/work" --out "$RUNNER_TEMP/rel" --round 1 --base ${{ needs.gate.outputs.base }} --base-branch ${{ github.event.repository.default_branch }}
+      - name: Ledger
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          st=$(python3 -c "import json;s=json.load(open('$RUNNER_TEMP/work/status.json'));print('pass' if s.get('ok') else 'stop')")
+          python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "rework_1=$st:re-entered at $(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/work/status.json')).get('entered_at','?'))")" --set "release_1=${{ steps.ship.outputs.shipped == 'true' && 'pass' || 'stop' }}:CI ${{ steps.ship.outputs.ci }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: release-1, path: "${{ runner.temp }}/rel/" }
+
+  # ---------------------------------------------------------------- stage 6, round 2 (last)
+  review_2:
+    needs: [gate, ship_1]
+    if: always() && needs.ship_1.outputs.shipped == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ needs.ship_1.outputs.head }}", fetch-depth: 0, persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { name: issue, path: "${{ runner.temp }}/in" }
+      - run: |
+          docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
+          git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose && git reset -q .autose
+      - name: Independent review (fresh VM, fresh context)
+        id: review
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m autose.pipeline review --issue-file "$RUNNER_TEMP/in/issue.json" --base ${{ needs.gate.outputs.base }} --round 2 --out "$RUNNER_TEMP/review"
+      - name: Post review + ledger
+        if: always() && steps.review.outcome == 'success'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          python3 -m autose.pipeline post-review --pr ${{ needs.ship_1.outputs.pr }} --review-md "$RUNNER_TEMP/review/review.md"
+          python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "review_2=${{ steps.review.outputs.verdict }}:see PR #${{ needs.ship_1.outputs.pr }}"
+          cat "$RUNNER_TEMP/review/review.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: review-2, path: "${{ runner.temp }}/review/" }
+
+  # ---------------------------------------------------------------- hand-off to a human
+  finalize:
+    needs: [gate, ship_0, review_1, rework_1, ship_1, review_2]
+    if: always() && needs.gate.outputs.mode == 'build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false, sparse-checkout: .autose }
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          V1: ${{ needs.review_1.outputs.verdict }}
+          V2: ${{ needs.review_2.outputs.verdict }}
+          SHIPPED: ${{ needs.ship_0.outputs.shipped }}
+        run: |
+          if [ "$SHIPPED" != "true" ]; then msg="stop:run stopped before release; see the ledger rows above and the run artifacts"
+          elif [ -n "$V2" ]; then msg="$([ "$V2" = approve ] && echo pass || echo stop):review round 2 = $V2. Two review rounds used; a maintainer decides whether to merge"
+          elif [ "$V1" = "approve" ] || [ "$V1" = "approve_by_default" ]; then msg="pass:reviewer approved in round 1; awaiting a maintainer's merge decision"
+          else msg="stop:review_1=$V1, rework did not reach a second review; a maintainer decides"; fi
+          python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "final=$msg"
