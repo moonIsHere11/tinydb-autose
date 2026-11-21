@@ -98,6 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.gate.outputs.base }}", persist-credentials: false }
+      - name: Use harness from the default branch (trusted, and picked up by re-runs)
+        run: git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose && git reset -q .autose
       - uses: actions/download-artifact@v4
         with: { name: issue, path: "${{ runner.temp }}/in" }
       - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
@@ -130,6 +132,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.gate.outputs.base }}", fetch-depth: 0 }
+      - name: Use harness from the default branch (trusted, and picked up by re-runs)
+        run: git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose && git reset -q .autose
       - uses: actions/download-artifact@v4
         with: { name: issue, path: "${{ runner.temp }}/in" }
       - uses: actions/download-artifact@v4
@@ -216,6 +220,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.gate.outputs.base }}", persist-credentials: false }
+      - name: Use harness from the default branch (trusted, and picked up by re-runs)
+        run: git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose && git reset -q .autose
       - uses: actions/download-artifact@v4
         with: { name: issue, path: "${{ runner.temp }}/in" }
       - uses: actions/download-artifact@v4
@@ -251,6 +257,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: "${{ needs.gate.outputs.base }}", fetch-depth: 0 }
+      - name: Use harness from the default branch (trusted, and picked up by re-runs)
+        run: git fetch -q origin ${{ github.event.repository.default_branch }} && git checkout FETCH_HEAD -- .autose && git reset -q .autose
       - uses: actions/download-artifact@v4
         with: { name: issue, path: "${{ runner.temp }}/in" }
       - uses: actions/download-artifact@v4

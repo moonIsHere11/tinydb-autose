@@ -131,7 +131,7 @@ def changed_files(repo: Path) -> list[str]:
     files = []
     for line in out.splitlines():
         f = line[3:].split(" -> ")[-1].strip('"')
-        if "__pycache__" not in f and not f.startswith(".pytest_cache"):
+        if "__pycache__" not in f and not f.startswith((".pytest_cache", ".autose/")):
             files.append(f)
     return files
 
