@@ -53,6 +53,7 @@ def parse_action(text: str) -> dict | None:
         return None
     body = m.group(1)
     args: dict = {}
+    body = re.sub(r"^--- (\w+):[ \t]+(\S.*)$", r"\1: \2", body, flags=re.M)  # inline "--- cmd: x" form
     head, *secs = re.split(r"^--- (\w+)[ \t]*$", body, flags=re.M)
     for line in head.splitlines():
         rng = re.match(r"^\s*(?:lines?\s*:?\s*)?(\d+)\s*(?:-|to|,|\s)\s*(\d+)\s*$", line)
@@ -60,7 +61,7 @@ def parse_action(text: str) -> dict | None:
             args["start"], args["end"] = rng.group(1), rng.group(2)
         elif ":" in line:
             k, v = line.split(":", 1)
-            args[k.strip()] = v.strip()
+            args[k.strip().lstrip("-").strip()] = v.strip()
     for name, val in zip(secs[0::2], secs[1::2]):
         args[name] = val.strip("\n")
     tool = args.pop("tool", None)
