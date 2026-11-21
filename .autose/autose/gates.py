@@ -217,15 +217,30 @@ def gate_tests(repo: Path, base: str, test_file: str, acs: list[dict], workdir: 
 
 
 # ---------------------------------------------------------------- stage 6
-def gate_review(verdict: dict, runs: list[dict]) -> tuple[str, list[dict], str]:
+def grounded(evidence: str, runs: list[dict], repo: Path | None) -> bool:
+    """ADR-012: evidence must be checkable against what actually happened, not just present.
+    Accept if it quotes an existing `path:line`, or shares a 24-char span with an executed command or its output."""
+    ev = " ".join(evidence.split())
+    if len(ev) < 8:
+        return False
+    if repo is not None:
+        for path, line in re.findall(r"((?:tinydb|tests)/[\w/]+\.py):(\d+)", ev):
+            f = repo / path
+            if f.exists() and int(line) <= len(f.read_text().splitlines()):
+                return True
+    hay = " ".join(" ".join((r.get("cmd", "") + " " + r.get("out_tail", "")).split()) for r in runs)
+    return any(ev[i:i + 24] in hay for i in range(0, max(1, len(ev) - 23), 4))
+
+
+def gate_review(verdict: dict, runs: list[dict], repo: Path | None = None) -> tuple[str, list[dict], str]:
     """Evidence gate. Returns (verdict, kept_findings, note)."""
     v = (verdict.get("verdict") or "").strip().lower().replace(" ", "_")
     findings = verdict.get("findings") or []
-    kept = [f for f in findings if str(f.get("evidence", "")).strip()]
+    kept = [f for f in findings if grounded(str(f.get("evidence", "")), runs, repo)]
     dropped = len(findings) - len(kept)
     note = []
     if dropped:
-        note.append(f"{dropped} finding(s) without evidence were dropped by the evidence gate.")
+        note.append(f"{dropped} finding(s) whose evidence matched no executed command output or real file:line were dropped by the evidence gate.")
     if v not in ("approve", "changes_requested"):
         return "invalid", kept, f"verdict {v!r} is not approve|changes_requested"
     if v == "approve" and not runs:

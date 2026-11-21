@@ -268,6 +268,9 @@ def parse_findings(text: str) -> list[dict]:
 def _review_guard(args: dict, tb) -> str | None:
     """Evidence gate enforced inside the loop: no approval before the reviewer has executed anything."""
     v = (args.get("verdict") or "").lower()
+    if not any(k in v for k in ("approve", "changes_requested", "changes requested")):
+        return ("your finish has no `verdict:` header line. Call finish again with a line "
+                "`verdict: approve` or `verdict: changes_requested`, plus the summary and findings sections.")
     if "approve" in v and not tb.runs:
         return ("you have not executed any command. Before approving, run the test suite and at least one probe "
                 "script in /tmp that tries to break the change, then decide again.")
@@ -302,7 +305,7 @@ def cmd_review(a):
     if a.variant == "naive":
         verdict, kept, note = (raw["verdict"].strip().lower().replace(" ", "_"), raw["findings"], "naive variant: no evidence gate")
     else:
-        verdict, kept, note = gates.gate_review(raw, tb.runs)
+        verdict, kept, note = gates.gate_review(raw, tb.runs, repo)
     rows = "\n".join(f"| {i} | {f['category']} | `{f.get('file', '')}` | {f['issue']} | {f.get('evidence', '')[:400]} |" for i, f in enumerate(kept, 1))
     md = (f"## AutoSE independent review (round {a.round}, {a.variant} reviewer)\n\n**Verdict:** `{verdict}`"
           f"{'  — ' + note if note else ''}\n\n{raw['summary']}\n\n"

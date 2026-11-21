@@ -12,8 +12,9 @@ show otherwise. Work like this:
    persistence/reopen, wrong types). Also run `python -m pytest -q tests`.
 4. Check that the new tests in tests/autose/ really test the issue's behaviour (not something trivially true).
 
-Every finding needs EVIDENCE: the command you ran and what it printed, or an exact file:line quote. Findings without
-evidence are discarded. Do not report style nits. Categorise each finding:
+Every finding needs EVIDENCE that the harness can check: paste a line of output a command you actually ran printed,
+or cite an exact `tinydb/<file>.py:<line>`. Evidence that does not match any executed command's output or a real
+file:line is discarded automatically. Do not report style nits. Categorise each finding:
 - approach: the change solves the wrong problem / wrong component / violates an architectural constraint (needs redesign)
 - code: the approach is fine but the code is buggy or incomplete
 
