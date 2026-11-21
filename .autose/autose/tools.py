@@ -27,14 +27,17 @@ PROFILES["reviewer_naive"] = PROFILES["reviewer"]
 MAX_OBS = 6000
 
 
-def sandbox(repo: Path, cmd: str, readonly: bool = False, timeout: int = 150) -> tuple[int, str]:
-    """Run a shell command in a throwaway container. Returns (exit_code, output)."""
+def sandbox(repo: Path, cmd: str, readonly: bool = False, timeout: int = 150,
+            scratch: Path | None = None) -> tuple[int, str]:
+    """Run a shell command in a throwaway container. Returns (exit_code, output).
+    `scratch` (if given) is mounted at /scratch and survives across one agent's commands."""
     mount = f"{repo.resolve()}:/work" + (":ro" if readonly else "")
+    extra = ["-v", f"{scratch.resolve()}:/scratch"] if scratch else []
     argv = ["docker", "run", "--rm", "--network", "none", "--memory", "1g", "--pids-limit", "256",
             "--cpus", "2", "--tmpfs", "/tmp:exec,size=256m", "-u", f"{os.getuid()}:{os.getgid()}",
             "-e", "HOME=/tmp", "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "COVERAGE_FILE=/tmp/.coverage",
             "-e", "PYTEST_ADDOPTS=-p no:cacheprovider -o addopts=", "-e", "MYPY_CACHE_DIR=/tmp/.mypy",
-            "-v", mount, "-w", "/work", IMAGE, "timeout", str(timeout - 10), "bash", "-c", cmd]
+            "-v", mount, *extra, "-w", "/work", IMAGE, "timeout", str(timeout - 10), "bash", "-c", cmd]
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env={"PATH": os.environ["PATH"]})
         return p.returncode, (p.stdout + p.stderr)
@@ -51,6 +54,8 @@ class Toolbox:
         self.role, self.repo, self.readonly_run = role, repo.resolve(), readonly_run
         self.prof = PROFILES[role]
         self.runs: list[dict] = []  # evidence log (commands actually executed)
+        import tempfile
+        self.scratch = Path(tempfile.mkdtemp(prefix=f"autose-{role}-"))
 
     # ---- path jail -------------------------------------------------------
     def _path(self, p: str) -> Path:
@@ -130,7 +135,7 @@ class Toolbox:
         return f"replaced 1 occurrence in {path}"
 
     def t_run(self, cmd: str) -> str:
-        code, out = sandbox(self.repo, cmd, readonly=self.readonly_run)
+        code, out = sandbox(self.repo, cmd, readonly=self.readonly_run, scratch=self.scratch)
         self.runs.append({"cmd": cmd, "exit": code, "out_tail": out[-1500:]})
         return _clip(f"$ {cmd}\n[exit {code}]\n{out}")
 
