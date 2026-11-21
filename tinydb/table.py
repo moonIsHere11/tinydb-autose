@@ -596,31 +596,87 @@ class Table:
         Document with a doc_id
         :returns: a list containing the updated documents' IDs
         """
+        return self.upsert_multiple([(document, cond)])[0]
 
-        # Extract doc_id
-        if isinstance(document, self.document_class) and hasattr(document, 'doc_id'):
-            doc_ids: Optional[list[int]] = [document.doc_id]
-        else:
-            doc_ids = None
+    def upsert_multiple(
+        self,
+        items: Iterable[tuple[Mapping, Optional[QueryLike]]],
+    ) -> list[list[int]]:
+        """
+        Update documents, if they exist, insert them otherwise, for multiple
+        (document, cond) pairs in a single storage write.
 
-        # Make sure we can actually find a matching document
-        if doc_ids is None and cond is None:
-            raise ValueError("If you don't specify a search query, you must "
-                             "specify a doc_id. Hint: use a table.Document "
-                             "object.")
+        :param items: an iterable of (document, cond) pairs
+        :returns: a list of lists containing the affected document IDs for each pair
+        """
+        result_ids: list[list[int]] = []
 
-        # Perform the update operation. ``update`` returns an empty list
-        # when no existing document matches the doc_id / query, in which
-        # case we fall through to insert below.
-        updated_docs = self.update(document, cond, doc_ids)
+        def perform_update(fields, table, doc_id):
+            if callable(fields):
+                fields(table[doc_id])
+            else:
+                table[doc_id].update(fields)
 
-        # If documents have been updated: return their IDs
-        if updated_docs:
-            return updated_docs
+        def updater(table: dict):
+            for document, cond in items:
+                if not isinstance(document, Mapping):
+                    raise ValueError('Document is not a Mapping')
 
-        # There are no documents that match the specified query -> insert the
-        # data as a new document
-        return [self.insert(document)]
+                if isinstance(document, self.document_class) and hasattr(document, 'doc_id'):
+                    doc_ids: Optional[list[int]] = [document.doc_id]
+                else:
+                    doc_ids = None
+
+                if doc_ids is None and cond is None:
+                    raise ValueError("If you don't specify a search query, you must "
+                                     "specify a doc_id. Hint: use a table.Document "
+                                     "object.")
+
+                updated_docs: list[int] = []
+
+                if doc_ids is not None:
+                    requested_ids = list(doc_ids)
+                    updated_docs.extend(
+                        doc_id for doc_id in requested_ids if doc_id in table
+                    )
+                    for doc_id in updated_docs:
+                        perform_update(document, table, doc_id)
+                elif cond is not None:
+                    _cond = cast(QueryLike, cond)
+                    for doc_id in list(table.keys()):
+                        if _cond(table[doc_id]):
+                            updated_docs.append(doc_id)
+                            perform_update(document, table, doc_id)
+
+                if updated_docs:
+                    result_ids.append(updated_docs)
+                else:
+                    # Insert document
+                    if isinstance(document, self.document_class):
+                        doc_id = document.doc_id
+                        if doc_id in table:
+                            raise ValueError(
+                                f'Document with ID {str(doc_id)} '
+                                f'already exists'
+                            )
+                        self._next_id = None
+                    else:
+                        next_id = self._next_id
+                        if next_id is None:
+                            if table:
+                                next_id = max(
+                                    self.document_id_class(i) for i in table.keys()
+                                ) + 1
+                            else:
+                                next_id = 1
+                        self._next_id = next_id
+                        doc_id = self._get_next_id()
+
+                    table[doc_id] = dict(document)
+                    result_ids.append([doc_id])
+
+        self._update_table(updater)
+        return result_ids
 
     def remove(
         self,
