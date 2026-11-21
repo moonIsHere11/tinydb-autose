@@ -169,6 +169,9 @@ def do_build_and_test(r: Run, feedback: str = "", allow_redesign: bool = True) -
                 need_tests = False
             ok, rep, info = gates.gate_tests(r.repo, r.base, r.test_file, r.acs, r.out / "work")
             r.log("testing", rep[:300])
+            with (r.out / "test_evals.jsonl").open("a") as fh:  # every evaluation, for the E2 replay
+                fh.write(json.dumps({"ok": ok, "report": rep, "table": info.get("table", ""),
+                                     "test_attempt": test_attempts, "impl_attempt": impl_attempts}) + "\n")
             report = (f"# Test report: issue #{r.issue['number']}\n\n**Stage check (code):** {rep}\n\n## Red/green per acceptance criterion\n"
                       f"{info.get('table', '')}\n\n## Full suite on head\n```\n{info.get('suite', '')}\n```\n")
             (r.out / "test_report.md").write_text(report)
