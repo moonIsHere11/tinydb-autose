@@ -473,6 +473,20 @@ class Query(QueryInstance):
             ('all', self._path, freeze(cond))
         )
 
+    def between(self, low: Any, high: Any) -> QueryInstance:
+        """
+        Check that a field's value lies between ``low`` and ``high``.
+
+        >>> Query().age.between(18, 30)
+        """
+        def test(value):
+            try:
+                return low < value < high
+            except TypeError:
+                return False
+
+        return self._generate_test(test, ('between', self._path, freeze(low), freeze(high)))
+
     def one_of(self, items: list[Any]) -> QueryInstance:
         """
         Check if the value is contained in a list or generator.
