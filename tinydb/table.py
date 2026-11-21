@@ -264,7 +264,7 @@ class Table:
         # query
         cached_results = self._query_cache.get(cond)
         if cached_results is not None:
-            return cached_results[:]
+            return [self.document_class(dict(doc), doc.doc_id) for doc in cached_results]
 
         # Perform the search by applying the query to all documents.
         # Then, only if the document matches the query, convert it
@@ -292,7 +292,7 @@ class Table:
                                                    lambda: True)
         if is_cacheable():
             # Update the query cache
-            self._query_cache[cond] = docs[:]
+            self._query_cache[cond] = [self.document_class(dict(d), d.doc_id) for d in docs]
 
         return docs
 
