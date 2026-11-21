@@ -259,6 +259,15 @@ def parse_findings(text: str) -> list[dict]:
     return out
 
 
+def _review_guard(args: dict, tb) -> str | None:
+    """Evidence gate enforced inside the loop: no approval before the reviewer has executed anything."""
+    v = (args.get("verdict") or "").lower()
+    if "approve" in v and not tb.runs:
+        return ("you have not executed any command. Before approving, run the test suite and at least one probe "
+                "script in /tmp that tries to break the change, then decide again.")
+    return None
+
+
 def cmd_review(a):
     """Stage 6. Inputs: issue + diff (computed here from git, not taken from the builder) + repo at PR head."""
     repo, out = Path(a.repo), Path(a.out)
@@ -280,7 +289,8 @@ def cmd_review(a):
     from .agent import run_agent as ra
     res, tb = ra(role, system, task, repo, usage, out / "transcripts" / "6-review.jsonl",
                  "verdict: approve|changes_requested, --- summary, --- findings", max_steps=STEPS,
-                 token_budget=TOKEN_BUDGET, readonly_run=True)
+                 token_budget=TOKEN_BUDGET, readonly_run=True,
+                 finish_guard=None if a.variant == "naive" else _review_guard)
     res = res or {"verdict": "none", "summary": "Reviewer exhausted its step budget without a verdict."}
     raw = {"verdict": res.get("verdict", ""), "summary": res.get("summary", ""), "findings": parse_findings(res.get("findings", ""))}
     if a.variant == "naive":

@@ -77,7 +77,7 @@ def parse_action(text: str) -> dict | None:
 
 def run_agent(role: str, system: str, task: str, repo: Path, usage: dict, log: Path,
               finish_args: str, max_steps: int = 15, token_budget: int = 1_500_000,
-              readonly_run: bool = False) -> tuple[dict | None, Toolbox]:
+              readonly_run: bool = False, finish_guard=None) -> tuple[dict | None, Toolbox]:
     """Returns (finish_args_dict or None if step budget exhausted, toolbox)."""
     tb = Toolbox(role, repo, readonly_run=readonly_run)
     llm = LLM(role, usage, token_budget)
@@ -100,8 +100,11 @@ def run_agent(role: str, system: str, task: str, repo: Path, usage: dict, log: P
             if act is None:
                 obs = "FORMAT ERROR: no valid <action> ... </action> block found. Reply again with exactly one action block."
             elif act["tool"] == "finish":
-                lf.write(json.dumps({"event": "finish", "step": step}) + "\n")
-                return act["args"], tb
+                refusal = finish_guard(act["args"], tb) if finish_guard else None
+                if refusal is None or step == max_steps:
+                    lf.write(json.dumps({"event": "finish", "step": step}) + "\n")
+                    return act["args"], tb
+                obs = "FINISH REFUSED: " + refusal
             else:
                 obs = tb.call(act["tool"], act["args"])
             left = max_steps - step
