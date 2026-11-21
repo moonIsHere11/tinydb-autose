@@ -115,6 +115,7 @@ class CachingMiddleware(Middleware):
 
         # Check if we need to flush the cache
         if self._cache_modified_count >= self.WRITE_CACHE_SIZE:
+            self._cache_modified_count = 0
             self.flush()
 
     def flush(self):
