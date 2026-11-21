@@ -127,6 +127,7 @@ class CachingMiddleware(Middleware):
         if self._cache_modified_count > 0:
             # Force-flush the cache by writing the data to the storage
             self.storage.write(self.cache)
+            self._cache_modified_count = 0
 
     def close(self):
         if self._closed:
