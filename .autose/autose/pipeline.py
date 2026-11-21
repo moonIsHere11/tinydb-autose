@@ -307,8 +307,14 @@ def cmd_review(a):
     else:
         verdict, kept, note = gates.gate_review(raw, tb.runs, repo)
     rows = "\n".join(f"| {i} | {f['category']} | `{f.get('file', '')}` | {f['issue']} | {f.get('evidence', '')[:400]} |" for i, f in enumerate(kept, 1))
+    from .llm import ROLE_MODELS
+    used = sorted(usage.get("by_model", {}))
+    primary = ROLE_MODELS[role][0]
+    degraded = bool(used) and used != [primary]
+    model_line = (f"\n\n**Reviewer model:** {', '.join(used) or 'none'}"
+                  + (f" — **degraded**: primary `{primary}` was unavailable; treat this review with extra caution." if degraded else ""))
     md = (f"## AutoSE independent review (round {a.round}, {a.variant} reviewer)\n\n**Verdict:** `{verdict}`"
-          f"{'  — ' + note if note else ''}\n\n{raw['summary']}\n\n"
+          f"{'  — ' + note if note else ''}{model_line}\n\n{raw['summary']}\n\n"
           + (f"| # | category | file | finding | evidence |\n|---|---|---|---|---|\n{rows}\n\n" if kept else "")
           + f"<details><summary>Commands the reviewer executed ({len(tb.runs)})</summary>\n\n"
           + "\n".join(f"- `{x['cmd'][:150]}` → exit {x['exit']}" for x in tb.runs) + "\n</details>\n\n"
