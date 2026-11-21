@@ -145,7 +145,10 @@ def do_build_and_test(r: Run, feedback: str = "", allow_redesign: bool = True) -
                 r.stage("implementation", False, feedback, impl_attempts - 1)
                 r.stop("testing", "Implementation could not satisfy the tests within budget:\n" + feedback, "test_report.md")
                 return False
-        task = (f"Spec:\n{r.spec}\n\nDesign:\n{r.design}\n\nImplement the design." +
+        src = gates.symbol_source(r.repo, gates.parse_changes(r.design))
+        task = (f"Spec:\n{r.spec}\n\nDesign:\n{r.design}\n\n"
+                + (f"Current source of the symbols the design names (already read for you):\n{src}\n\n" if src else "")
+                + "Implement the design now: make the edit within your first few steps, then verify." +
                 (f"\n\nFEEDBACK from the previous attempt (fix this):\n{feedback}" if feedback else ""))
         res, _ = r.agent("builder", prompt("builder"), task, f"3-implementation-{impl_attempts}{'-r' if redesigned else ''}", "--- summary")
         ok, rep = gates.gate_build(r.repo)

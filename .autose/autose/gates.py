@@ -70,6 +70,34 @@ def _symbols(path: Path) -> set[str]:
     return out
 
 
+def symbol_source(repo: Path, rows: list[tuple[str, str, str]], limit: int = 260) -> str:
+    """Source (with line numbers) of every existing symbol the design names: the Builder's starting context."""
+    out, used = [], 0
+    for f, sym, kind in rows:
+        p = repo / f
+        if not p.exists() or not sym:
+            continue
+        lines = p.read_text().splitlines()
+        tree = ast.parse("\n".join(lines))
+        target = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and "." in sym and node.name == sym.split(".")[0]:
+                for sub in node.body:
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub.name == sym.split(".")[1]:
+                        target = sub
+            elif isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == sym and "." not in sym:
+                target = node
+        if target is None:
+            continue
+        a, b = target.lineno, target.end_lineno or target.lineno
+        if used + (b - a) > limit:
+            break
+        used += b - a
+        out.append(f"### {f}::{sym} (lines {a}-{b})\n```python\n" +
+                   "\n".join(f"{i:4d}| {lines[i - 1]}" for i in range(a, b + 1)) + "\n```")
+    return "\n\n".join(out)
+
+
 def parse_changes(design: str) -> list[tuple[str, str, str]]:
     rows = []
     for line in design.splitlines():
