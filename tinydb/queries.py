@@ -128,7 +128,7 @@ class QueryInstance:
         # (a | b == b | a) and the frozenset does not consider the order of
         # elements
         if self.is_cacheable() and other.is_cacheable():
-            hashval = ('and', frozenset([self._hash, other._hash]))
+            hashval = None  # OR queries are evaluated fresh every time
         else:
             hashval = None
         return QueryInstance(lambda value: self(value) or other(value), hashval)
