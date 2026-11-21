@@ -37,7 +37,7 @@ tool: <tool name>
 
 Tools available to you: {tools}
 - list   path            -> directory listing
-- read   path [start end] -> numbered lines (default 1-400)
+- read   path, optional start/end -> numbered lines (default 1-400), e.g. header lines `path: tinydb/table.py`, `start: 230`, `end: 280`
 - grep   pattern [path]  -> regex search over .py files
 - write  path, --- content       -> create/overwrite a file (only inside your write scope: {scope})
 - replace path, --- old, --- new -> replace an exact, unique snippet (copy `old` verbatim, without line numbers)
@@ -55,7 +55,10 @@ def parse_action(text: str) -> dict | None:
     args: dict = {}
     head, *secs = re.split(r"^--- (\w+)[ \t]*$", body, flags=re.M)
     for line in head.splitlines():
-        if ":" in line:
+        rng = re.match(r"^\s*(?:lines?\s*:?\s*)?(\d+)\s*(?:-|to|,|\s)\s*(\d+)\s*$", line)
+        if rng:  # weaker models write "230 280" or "lines: 230-280" for a range
+            args["start"], args["end"] = rng.group(1), rng.group(2)
+        elif ":" in line:
             k, v = line.split(":", 1)
             args[k.strip()] = v.strip()
     for name, val in zip(secs[0::2], secs[1::2]):

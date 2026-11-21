@@ -35,6 +35,23 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+MIN_INTERVAL = float(os.environ.get("AUTOSE_MIN_INTERVAL", "4.5"))  # free tier ~15 RPM per model
+_last_call: dict[str, float] = {}
+
+
+def _pace(model: str):
+    wait = _last_call.get(model, 0) + MIN_INTERVAL - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    _last_call[model] = time.time()
+
+
+def _retry_delay(msg: str, default: float) -> float:
+    import re as _re
+    m = _re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', msg)
+    return min(90.0, float(m.group(1)) + 1) if m else default
+
+
 class LLM:
     def __init__(self, role: str, usage: dict, token_budget: int):
         self.role = role
@@ -45,6 +62,7 @@ class LLM:
         self.budget = token_budget
 
     def _post(self, model: str, body: dict) -> dict:
+        _pace(model)
         req = urllib.request.Request(
             API.format(model=model), data=json.dumps(body).encode(),
             headers={"content-type": "application/json", "x-goog-api-key": self.key})
@@ -69,10 +87,13 @@ class LLM:
                 try:
                     d = self._post(model, body)
                 except urllib.error.HTTPError as e:
-                    msg = e.read().decode(errors="replace")[:300]
+                    msg = e.read().decode(errors="replace")[:2000]
                     last_err = f"{model}: HTTP {e.code} {msg}"
-                    if e.code == 429:  # rate limit: back off, same model
-                        time.sleep(min(60, 10 * 2 ** attempt) + random.random() * 3)
+                    if e.code == 429:  # rate limit: honour retryDelay, same model; daily quota -> next model
+                        if "PerDay" in msg or attempt >= 4:
+                            break
+                        print(f"[llm] 429 on {model}, backing off", flush=True)
+                        time.sleep(_retry_delay(msg, 10 * 2 ** attempt) + random.random() * 2)
                         continue
                     if e.code in (500, 503, 504):  # overloaded: one quick retry, then next model
                         if attempt >= 1:
