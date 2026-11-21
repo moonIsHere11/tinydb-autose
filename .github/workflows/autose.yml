@@ -1,7 +1,8 @@
 # AutoSE: issue in -> tested, independently reviewed PR out. A human merges.
 # Unrolled, bounded DAG (ADR-002):
 #   gate -> build -> ship_0 -> review_1 -> rework_1 -> ship_1 -> review_2 -> finalize
-# Each job gets only the token permissions it needs (ADR-005). The LLM never holds a
+# Each job gets only the token permissions it needs (ADR-005). Artifacts produced by re-runnable
+# jobs and consumed downstream carry the run attempt in their name (ADR-004 amendment). The LLM never holds a
 # token: agents run inside a --network none container; tokens are used only by
 # deterministic harness steps. Issue/comment text is never interpolated into shell.
 name: autose
@@ -207,7 +208,7 @@ jobs:
           cat "$RUNNER_TEMP/review/review.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: review-1, path: "${{ runner.temp }}/review/" }
+        with: { name: "review-1-a${{ github.run_attempt }}", path: "${{ runner.temp }}/review/" }
 
   # ---------------------------------------------------------------- back-edge: review -> design|implementation
   rework_1:
@@ -227,7 +228,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: work-0, path: "${{ runner.temp }}/work0" }
       - uses: actions/download-artifact@v4
-        with: { name: review-1, path: "${{ runner.temp }}/review1" }
+        with: { name: "review-1-a${{ github.run_attempt }}", path: "${{ runner.temp }}/review1" }
       - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
       - name: Rework (re-enter at design or implementation)
         env:
@@ -238,7 +239,7 @@ jobs:
         run: for f in design.md test_report.md; do [ -f "$RUNNER_TEMP/work/$f" ] && { echo; cat "$RUNNER_TEMP/work/$f"; } >> "$GITHUB_STEP_SUMMARY"; done; true
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: work-1, path: "${{ runner.temp }}/work/", include-hidden-files: true }
+        with: { name: "work-1-a${{ github.run_attempt }}", path: "${{ runner.temp }}/work/", include-hidden-files: true }
 
   ship_1:
     needs: [gate, rework_1]
@@ -262,7 +263,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: issue, path: "${{ runner.temp }}/in" }
       - uses: actions/download-artifact@v4
-        with: { name: work-1, path: "${{ runner.temp }}/work" }
+        with: { name: "work-1-a${{ github.run_attempt }}", path: "${{ runner.temp }}/work" }
         continue-on-error: true
       - run: docker build -q -t autose-sandbox -f .autose/sandbox.Dockerfile .autose
       - name: Push rework, update PR, run CI
@@ -279,7 +280,7 @@ jobs:
           python3 -m autose.pipeline ledger --issue ${{ needs.gate.outputs.issue }} --set "rework_1=$st:re-entered at $(python3 -c "import json;print(json.load(open('$RUNNER_TEMP/work/status.json')).get('entered_at','?'))")" --set "release_1=${{ steps.ship.outputs.shipped == 'true' && 'pass' || 'stop' }}:CI ${{ steps.ship.outputs.ci }}"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: release-1, path: "${{ runner.temp }}/rel/" }
+        with: { name: "release-1-a${{ github.run_attempt }}", path: "${{ runner.temp }}/rel/" }
 
   # ---------------------------------------------------------------- stage 6, round 2 (last)
   review_2:
@@ -315,7 +316,7 @@ jobs:
           cat "$RUNNER_TEMP/review/review.md" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: review-2, path: "${{ runner.temp }}/review/" }
+        with: { name: "review-2-a${{ github.run_attempt }}", path: "${{ runner.temp }}/review/" }
 
   # ---------------------------------------------------------------- hand-off to a human
   finalize:
